@@ -2,294 +2,26 @@
 IHyperStrategy interface, hyperoptable Parameter class.
 This module defines a base class for auto-hyperoptable strategies.
 """
+
 import logging
-from abc import ABC, abstractmethod
-from contextlib import suppress
+from collections import defaultdict
+from collections.abc import Iterator
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
-from freqtrade.misc import deep_merge_dicts, json_load
+from freqtrade.constants import Config
+from freqtrade.exceptions import DependencyException, OperationalException
+from freqtrade.misc import deep_merge_dicts
 from freqtrade.optimize.hyperopt_tools import HyperoptTools
-
-
-with suppress(ImportError):
-    from skopt.space import Integer, Real, Categorical
-    from freqtrade.optimize.space import SKDecimal
-
-from freqtrade.enums import RunMode
-from freqtrade.exceptions import OperationalException
+from freqtrade.strategy.parameters import BaseParameter
 
 
 logger = logging.getLogger(__name__)
 
 
-class BaseParameter(ABC):
-    """
-    Defines a parameter that can be optimized by hyperopt.
-    """
-    category: Optional[str]
-    default: Any
-    value: Any
-    in_space: bool = False
-    name: str
-
-    def __init__(self, *, default: Any, space: Optional[str] = None,
-                 optimize: bool = True, load: bool = True, **kwargs):
-        """
-        Initialize hyperopt-optimizable parameter.
-        :param space: A parameter category. Can be 'buy' or 'sell'. This parameter is optional if
-         parameter field
-         name is prefixed with 'buy_' or 'sell_'.
-        :param optimize: Include parameter in hyperopt optimizations.
-        :param load: Load parameter value from {space}_params.
-        :param kwargs: Extra parameters to skopt.space.(Integer|Real|Categorical).
-        """
-        if 'name' in kwargs:
-            raise OperationalException(
-                'Name is determined by parameter field name and can not be specified manually.')
-        self.category = space
-        self._space_params = kwargs
-        self.value = default
-        self.optimize = optimize
-        self.load = load
-
-    def __repr__(self):
-        return f'{self.__class__.__name__}({self.value})'
-
-    @abstractmethod
-    def get_space(self, name: str) -> Union['Integer', 'Real', 'SKDecimal', 'Categorical']:
-        """
-        Get-space - will be used by Hyperopt to get the hyperopt Space
-        """
-
-
-class NumericParameter(BaseParameter):
-    """ Internal parameter used for Numeric purposes """
-    float_or_int = Union[int, float]
-    default: float_or_int
-    value: float_or_int
-
-    def __init__(self, low: Union[float_or_int, Sequence[float_or_int]],
-                 high: Optional[float_or_int] = None, *, default: float_or_int,
-                 space: Optional[str] = None, optimize: bool = True, load: bool = True, **kwargs):
-        """
-        Initialize hyperopt-optimizable numeric parameter.
-        Cannot be instantiated, but provides the validation for other numeric parameters
-        :param low: Lower end (inclusive) of optimization space or [low, high].
-        :param high: Upper end (inclusive) of optimization space.
-                     Must be none of entire range is passed first parameter.
-        :param default: A default value.
-        :param space: A parameter category. Can be 'buy' or 'sell'. This parameter is optional if
-                      parameter fieldname is prefixed with 'buy_' or 'sell_'.
-        :param optimize: Include parameter in hyperopt optimizations.
-        :param load: Load parameter value from {space}_params.
-        :param kwargs: Extra parameters to skopt.space.*.
-        """
-        if high is not None and isinstance(low, Sequence):
-            raise OperationalException(f'{self.__class__.__name__} space invalid.')
-        if high is None or isinstance(low, Sequence):
-            if not isinstance(low, Sequence) or len(low) != 2:
-                raise OperationalException(f'{self.__class__.__name__} space must be [low, high]')
-            self.low, self.high = low
-        else:
-            self.low = low
-            self.high = high
-
-        super().__init__(default=default, space=space, optimize=optimize,
-                         load=load, **kwargs)
-
-
-class IntParameter(NumericParameter):
-    default: int
-    value: int
-
-    def __init__(self, low: Union[int, Sequence[int]], high: Optional[int] = None, *, default: int,
-                 space: Optional[str] = None, optimize: bool = True, load: bool = True, **kwargs):
-        """
-        Initialize hyperopt-optimizable integer parameter.
-        :param low: Lower end (inclusive) of optimization space or [low, high].
-        :param high: Upper end (inclusive) of optimization space.
-                     Must be none of entire range is passed first parameter.
-        :param default: A default value.
-        :param space: A parameter category. Can be 'buy' or 'sell'. This parameter is optional if
-                      parameter fieldname is prefixed with 'buy_' or 'sell_'.
-        :param optimize: Include parameter in hyperopt optimizations.
-        :param load: Load parameter value from {space}_params.
-        :param kwargs: Extra parameters to skopt.space.Integer.
-        """
-
-        super().__init__(low=low, high=high, default=default, space=space, optimize=optimize,
-                         load=load, **kwargs)
-
-    def get_space(self, name: str) -> 'Integer':
-        """
-        Create skopt optimization space.
-        :param name: A name of parameter field.
-        """
-        return Integer(low=self.low, high=self.high, name=name, **self._space_params)
-
-    @property
-    def range(self):
-        """
-        Get each value in this space as list.
-        Returns a List from low to high (inclusive) in Hyperopt mode.
-        Returns a List with 1 item (`value`) in "non-hyperopt" mode, to avoid
-        calculating 100ds of indicators.
-        """
-        if self.in_space and self.optimize:
-            # Scikit-optimize ranges are "inclusive", while python's "range" is exclusive
-            return range(self.low, self.high + 1)
-        else:
-            return range(self.value, self.value + 1)
-
-
-class RealParameter(NumericParameter):
-    default: float
-    value: float
-
-    def __init__(self, low: Union[float, Sequence[float]], high: Optional[float] = None, *,
-                 default: float, space: Optional[str] = None, optimize: bool = True,
-                 load: bool = True, **kwargs):
-        """
-        Initialize hyperopt-optimizable floating point parameter with unlimited precision.
-        :param low: Lower end (inclusive) of optimization space or [low, high].
-        :param high: Upper end (inclusive) of optimization space.
-                     Must be none if entire range is passed first parameter.
-        :param default: A default value.
-        :param space: A parameter category. Can be 'buy' or 'sell'. This parameter is optional if
-                      parameter fieldname is prefixed with 'buy_' or 'sell_'.
-        :param optimize: Include parameter in hyperopt optimizations.
-        :param load: Load parameter value from {space}_params.
-        :param kwargs: Extra parameters to skopt.space.Real.
-        """
-        super().__init__(low=low, high=high, default=default, space=space, optimize=optimize,
-                         load=load, **kwargs)
-
-    def get_space(self, name: str) -> 'Real':
-        """
-        Create skopt optimization space.
-        :param name: A name of parameter field.
-        """
-        return Real(low=self.low, high=self.high, name=name, **self._space_params)
-
-
-class DecimalParameter(NumericParameter):
-    default: float
-    value: float
-
-    def __init__(self, low: Union[float, Sequence[float]], high: Optional[float] = None, *,
-                 default: float, decimals: int = 3, space: Optional[str] = None,
-                 optimize: bool = True, load: bool = True, **kwargs):
-        """
-        Initialize hyperopt-optimizable decimal parameter with a limited precision.
-        :param low: Lower end (inclusive) of optimization space or [low, high].
-        :param high: Upper end (inclusive) of optimization space.
-                     Must be none if entire range is passed first parameter.
-        :param default: A default value.
-        :param decimals: A number of decimals after floating point to be included in testing.
-        :param space: A parameter category. Can be 'buy' or 'sell'. This parameter is optional if
-                      parameter fieldname is prefixed with 'buy_' or 'sell_'.
-        :param optimize: Include parameter in hyperopt optimizations.
-        :param load: Load parameter value from {space}_params.
-        :param kwargs: Extra parameters to skopt.space.Integer.
-        """
-        self._decimals = decimals
-        default = round(default, self._decimals)
-
-        super().__init__(low=low, high=high, default=default, space=space, optimize=optimize,
-                         load=load, **kwargs)
-
-    def get_space(self, name: str) -> 'SKDecimal':
-        """
-        Create skopt optimization space.
-        :param name: A name of parameter field.
-        """
-        return SKDecimal(low=self.low, high=self.high, decimals=self._decimals, name=name,
-                         **self._space_params)
-
-    @property
-    def range(self):
-        """
-        Get each value in this space as list.
-        Returns a List from low to high (inclusive) in Hyperopt mode.
-        Returns a List with 1 item (`value`) in "non-hyperopt" mode, to avoid
-        calculating 100ds of indicators.
-        """
-        if self.in_space and self.optimize:
-            low = int(self.low * pow(10, self._decimals))
-            high = int(self.high * pow(10, self._decimals)) + 1
-            return [round(n * pow(0.1, self._decimals), self._decimals) for n in range(low, high)]
-        else:
-            return [self.value]
-
-
-class CategoricalParameter(BaseParameter):
-    default: Any
-    value: Any
-    opt_range: Sequence[Any]
-
-    def __init__(self, categories: Sequence[Any], *, default: Optional[Any] = None,
-                 space: Optional[str] = None, optimize: bool = True, load: bool = True, **kwargs):
-        """
-        Initialize hyperopt-optimizable parameter.
-        :param categories: Optimization space, [a, b, ...].
-        :param default: A default value. If not specified, first item from specified space will be
-         used.
-        :param space: A parameter category. Can be 'buy' or 'sell'. This parameter is optional if
-         parameter field
-         name is prefixed with 'buy_' or 'sell_'.
-        :param optimize: Include parameter in hyperopt optimizations.
-        :param load: Load parameter value from {space}_params.
-        :param kwargs: Extra parameters to skopt.space.Categorical.
-        """
-        if len(categories) < 2:
-            raise OperationalException(
-                'CategoricalParameter space must be [a, b, ...] (at least two parameters)')
-        self.opt_range = categories
-        super().__init__(default=default, space=space, optimize=optimize,
-                         load=load, **kwargs)
-
-    def get_space(self, name: str) -> 'Categorical':
-        """
-        Create skopt optimization space.
-        :param name: A name of parameter field.
-        """
-        return Categorical(self.opt_range, name=name, **self._space_params)
-
-    @property
-    def range(self):
-        """
-        Get each value in this space as list.
-        Returns a List of categories in Hyperopt mode.
-        Returns a List with 1 item (`value`) in "non-hyperopt" mode, to avoid
-        calculating 100ds of indicators.
-        """
-        if self.in_space and self.optimize:
-            return self.opt_range
-        else:
-            return [self.value]
-
-
-class BooleanParameter(CategoricalParameter):
-
-    def __init__(self, *, default: Optional[Any] = None,
-                 space: Optional[str] = None, optimize: bool = True, load: bool = True, **kwargs):
-        """
-        Initialize hyperopt-optimizable Boolean Parameter.
-        It's a shortcut to `CategoricalParameter([True, False])`.
-        :param default: A default value. If not specified, first item from specified space will be
-         used.
-        :param space: A parameter category. Can be 'buy' or 'sell'. This parameter is optional if
-         parameter field
-         name is prefixed with 'buy_' or 'sell_'.
-        :param optimize: Include parameter in hyperopt optimizations.
-        :param load: Load parameter value from {space}_params.
-        :param kwargs: Extra parameters to skopt.space.Categorical.
-        """
-
-        categories = [True, False]
-        super().__init__(categories=categories, default=default, space=space, optimize=optimize,
-                         load=load, **kwargs)
+# Type aliases
+SpaceParams = dict[str, BaseParameter]
+AllSpaceParams = dict[str, SpaceParams]
 
 
 class HyperStrategyMixin:
@@ -298,93 +30,103 @@ class HyperStrategyMixin:
      strategy logic.
     """
 
-    def __init__(self, config: Dict[str, Any], *args, **kwargs):
+    def __init__(self, config: Config, *args, **kwargs):
         """
         Initialize hyperoptable strategy mixin.
         """
         self.config = config
-        self.ft_buy_params: List[BaseParameter] = []
-        self.ft_sell_params: List[BaseParameter] = []
-        self.ft_protection_params: List[BaseParameter] = []
+        self._ft_hyper_params: AllSpaceParams = {}
+        self._ft_copy_parameters()
 
-        self._load_hyper_params(config.get('runmode') == RunMode.HYPEROPT)
+        params = self.load_params_from_file()
+        params = params.get("params", {})
+        self._ft_params_from_file = params
+        # Init/loading of parameters is done as part of ft_bot_start().
 
-    def enumerate_parameters(self, category: str = None) -> Iterator[Tuple[str, BaseParameter]]:
+    def _ft_copy_parameters(self) -> None:
+        """
+        Give this instance its own copy of all class-level parameters.
+        Parameters of a base class imported from another module are shared by every strategy
+        that inherits from it - so values set on one strategy would leak into all others.
+        """
+        for attr_name in dir(type(self)):
+            if attr_name.startswith("__"):
+                continue
+            attr = getattr(type(self), attr_name, None)
+            if isinstance(attr, BaseParameter):
+                setattr(self, attr_name, deepcopy(attr))
+
+    def enumerate_parameters(self, space: str | None = None) -> Iterator[tuple[str, BaseParameter]]:
         """
         Find all optimizable parameters and return (name, attr) iterator.
-        :param category:
+        :param space: parameter space to filter for, or None for all spaces.
         :return:
         """
-        if category not in ('buy', 'sell', 'protection', None):
-            raise OperationalException(
-                'Category must be one of: "buy", "sell", "protection", None.')
+        for space_ in [c for c in self._ft_hyper_params if space is None or c == space]:
+            for par in self._ft_hyper_params[space_].values():
+                yield par.name, par
 
-        if category is None:
-            params = self.ft_buy_params + self.ft_sell_params + self.ft_protection_params
-        else:
-            params = getattr(self, f"ft_{category}_params")
+    def ft_set_special_params_from_file(self) -> None:
+        """
+        Sets special parameters (stoploss, roi, trailing, max_open_trades) from the
+        previously loaded file.
+        Should/must run before config values are loaded in strategy_resolver.
+        """
+        if self._ft_params_from_file:
+            # Set parameters from Hyperopt results file
+            params = self._ft_params_from_file
+            self.minimal_roi = params.get("roi", getattr(self, "minimal_roi", {}))
 
-        for par in params:
-            yield par.name, par
+            self.stoploss = params.get("stoploss", {}).get(
+                "stoploss", getattr(self, "stoploss", -0.1)
+            )
+            self.max_open_trades = params.get("max_open_trades", {}).get(
+                "max_open_trades", getattr(self, "max_open_trades", -1)
+            )
+            trailing = params.get("trailing", {})
+            self.trailing_stop = trailing.get(
+                "trailing_stop", getattr(self, "trailing_stop", False)
+            )
+            self.trailing_stop_positive = trailing.get(
+                "trailing_stop_positive", getattr(self, "trailing_stop_positive", None)
+            )
+            self.trailing_stop_positive_offset = trailing.get(
+                "trailing_stop_positive_offset", getattr(self, "trailing_stop_positive_offset", 0)
+            )
+            self.trailing_only_offset_is_reached = trailing.get(
+                "trailing_only_offset_is_reached",
+                getattr(self, "trailing_only_offset_is_reached", 0.0),
+            )
 
-    @classmethod
-    def detect_parameters(cls, category: str) -> Iterator[Tuple[str, BaseParameter]]:
-        """ Detect all parameters for 'category' """
-        for attr_name in dir(cls):
-            if not attr_name.startswith('__'):  # Ignore internals, not strictly necessary.
-                attr = getattr(cls, attr_name)
-                if issubclass(attr.__class__, BaseParameter):
-                    if (attr_name.startswith(category + '_')
-                            and attr.category is not None and attr.category != category):
-                        raise OperationalException(
-                            f'Inconclusive parameter name {attr_name}, category: {attr.category}.')
-                    if (category == attr.category or
-                            (attr_name.startswith(category + '_') and attr.category is None)):
-                        yield attr_name, attr
-
-    @classmethod
-    def detect_all_parameters(cls) -> Dict:
-        """ Detect all parameters and return them as a list"""
-        params: Dict = {
-            'buy': list(cls.detect_parameters('buy')),
-            'sell': list(cls.detect_parameters('sell')),
-            'protection': list(cls.detect_parameters('protection')),
-        }
-        params.update({
-            'count': len(params['buy'] + params['sell'] + params['protection'])
-        })
-
-        return params
-
-    def _load_hyper_params(self, hyperopt: bool = False) -> None:
+    def ft_load_hyper_params(self, hyperopt: bool = False) -> None:
         """
         Load Hyperoptable parameters
+        Prevalence:
+        * Parameters from parameter file
+        * Parameters defined in parameters objects (buy_params, sell_params, ...)
+        * Parameter defaults
         """
-        params = self.load_params_from_file()
-        params = params.get('params', {})
-        self._ft_params_from_file = params
-        buy_params = deep_merge_dicts(params.get('buy', {}), getattr(self, 'buy_params', {}))
-        sell_params = deep_merge_dicts(params.get('sell', {}), getattr(self, 'sell_params', {}))
-        protection_params = deep_merge_dicts(params.get('protection', {}),
-                                             getattr(self, 'protection_params', {}))
+        self._ft_hyper_params = detect_all_parameters(self)
 
-        self._load_params(buy_params, 'buy', hyperopt)
-        self._load_params(sell_params, 'sell', hyperopt)
-        self._load_params(protection_params, 'protection', hyperopt)
+        for space in self._ft_hyper_params:
+            params_values = deep_merge_dicts(
+                self._ft_params_from_file.get(space, {}),
+                deepcopy(getattr(self, f"{space}_params", {})),
+            )
+            self._ft_set_param(self._ft_hyper_params[space], params_values, space, hyperopt)
 
-    def load_params_from_file(self) -> Dict:
-        filename_str = getattr(self, '__file__', '')
+    def load_params_from_file(self) -> dict:
+        filename_str = getattr(self, "__file__", "")
         if not filename_str:
             return {}
-        filename = Path(filename_str).with_suffix('.json')
+        filename = Path(filename_str).with_suffix(".json")
 
         if filename.is_file():
             logger.info(f"Loading parameters from file {filename}")
             try:
-                with filename.open('r') as f:
-                    params = json_load(f)
-                if params.get('strategy_name') != self.__class__.__name__:
-                    raise OperationalException('Invalid parameter file provided.')
+                params = HyperoptTools.load_params_from_file(filename)
+                if params.get("strategy_name") != self.__class__.__name__:
+                    raise OperationalException("Invalid parameter file provided.")
                 return params
             except ValueError:
                 logger.warning("Invalid parameter file format.")
@@ -393,43 +135,76 @@ class HyperStrategyMixin:
 
         return {}
 
-    def _load_params(self, params: Dict, space: str, hyperopt: bool = False) -> None:
+    def _ft_set_param(
+        self, params: SpaceParams, param_values: dict, space: str, hyperopt: bool = False
+    ) -> None:
         """
         Set optimizable parameter values.
         :param params: Dictionary with new parameter values.
+        :param param_values: Dictionary with values to set.
+        :param space: The space to which the parameters belong.
+        :param hyperopt: Flag indicating if we are in hyperopt mode.
         """
-        if not params:
+        if not param_values:
             logger.info(f"No params for {space} found, using default values.")
-        param_container: List[BaseParameter] = getattr(self, f"ft_{space}_params")
 
-        for attr_name, attr in self.detect_parameters(space):
-            attr.name = attr_name
-            attr.in_space = hyperopt and HyperoptTools.has_space(self.config, space)
-            if not attr.category:
-                attr.category = space
+        for param_name, param in params.items():
+            param.in_space = hyperopt and HyperoptTools.has_space(self.config, space)
+            if not param.space:
+                param.space = space
 
-            param_container.append(attr)
-
-            if params and attr_name in params:
-                if attr.load:
-                    attr.value = params[attr_name]
-                    logger.info(f'Strategy Parameter: {attr_name} = {attr.value}')
+            if param_values and param_name in param_values:
+                if param.load:
+                    param.value = param_values[param_name]
+                    logger.info(f"Strategy Parameter: {param_name} = {param.value}")
                 else:
-                    logger.warning(f'Parameter "{attr_name}" exists, but is disabled. '
-                                   f'Default value "{attr.value}" used.')
+                    logger.warning(
+                        f'Parameter "{param_name}" exists, but is disabled. '
+                        f'Default value "{param.value}" used.'
+                    )
             else:
-                logger.info(f'Strategy Parameter(default): {attr_name} = {attr.value}')
+                logger.info(f"Strategy Parameter(default): {param_name} = {param.value}")
 
-    def get_no_optimize_params(self):
+    def get_no_optimize_params(self) -> dict[str, dict]:
         """
         Returns list of Parameters that are not part of the current optimize job
         """
-        params = {
-            'buy': {},
-            'sell': {},
-            'protection': {},
-        }
+        params: dict[str, dict] = defaultdict(dict)
         for name, p in self.enumerate_parameters():
-            if not p.optimize or not p.in_space:
-                params[p.category][name] = p.value
+            if p.space and (not p.optimize or not p.in_space):
+                params[p.space][name] = p.value
         return params
+
+
+def detect_all_parameters(
+    obj: HyperStrategyMixin | type[HyperStrategyMixin],
+) -> AllSpaceParams:
+    """
+    Detect all hyperoptable parameters for this object.
+    :param obj: Strategy object or class
+    :return: Dictionary of detected parameters by space
+    """
+    auto_categories = ["buy", "sell", "enter", "exit", "protection"]
+    result: AllSpaceParams = defaultdict(dict)
+    for attr_name in dir(obj):
+        if attr_name.startswith("__"):  # Ignore internals
+            continue
+        attr = getattr(obj, attr_name)
+        if not issubclass(attr.__class__, BaseParameter):
+            continue
+        if not attr.space:
+            # space auto detection
+            for space in auto_categories:
+                if attr_name.startswith(space + "_"):
+                    attr.space = space
+                    break
+        if attr.space is None:
+            raise DependencyException(f"Cannot determine parameter space for {attr_name}.")
+
+        if attr.space in ("all", "default") or attr.space.isidentifier() is False:
+            raise DependencyException(
+                f"'{attr.space}' is not a valid space. Parameter: {attr_name}."
+            )
+        attr.name = attr_name
+        result[attr.space][attr_name] = attr
+    return result

@@ -1,51 +1,43 @@
 """
 Rate of change pairlist filter
 """
-import logging
-from copy import deepcopy
-from typing import Any, Dict, List, Optional
 
-import arrow
-from cachetools.ttl import TTLCache
+import logging
+
 from pandas import DataFrame
 
+from freqtrade.constants import ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
+from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.misc import plural
-from freqtrade.plugins.pairlist.IPairList import IPairList
+from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
+from freqtrade.util import FtTTLCache
 
 
 logger = logging.getLogger(__name__)
 
 
 class RangeStabilityFilter(IPairList):
+    supports_backtesting = SupportsBacktesting.NO
 
-    def __init__(self, exchange, pairlistmanager,
-                 config: Dict[str, Any], pairlistconfig: Dict[str, Any],
-                 pairlist_pos: int) -> None:
-        super().__init__(exchange, pairlistmanager, config, pairlistconfig, pairlist_pos)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
 
-        self._days = pairlistconfig.get('lookback_days', 10)
-        self._min_rate_of_change = pairlistconfig.get('min_rate_of_change', 0.01)
-        self._max_rate_of_change = pairlistconfig.get('max_rate_of_change', None)
-        self._refresh_period = pairlistconfig.get('refresh_period', 1440)
+        self._min_rate_of_change = self._pairlistconfig.get("min_rate_of_change", 0.01)
+        self._max_rate_of_change = self._pairlistconfig.get("max_rate_of_change")
+        self._refresh_period = self._pairlistconfig.get("refresh_period", 86400)
+        self._def_candletype = self._config["candle_type_def"]
+        self._sort_direction: str | None = self._pairlistconfig.get("sort_direction", None)
 
-        self._pair_cache: TTLCache = TTLCache(maxsize=1000, ttl=self._refresh_period)
+        self._pair_cache: FtTTLCache = FtTTLCache(maxsize=1000, ttl=self._refresh_period)
 
-        if self._days < 1:
-            raise OperationalException("RangeStabilityFilter requires lookback_days to be >= 1")
-        if self._days > exchange.ohlcv_candle_limit('1d'):
-            raise OperationalException("RangeStabilityFilter requires lookback_days to not "
-                                       "exceed exchange max request size "
-                                       f"({exchange.ohlcv_candle_limit('1d')})")
+        self._init_lookback_config(required=True, deprecated_fallback=10)
 
-    @property
-    def needstickers(self) -> bool:
-        """
-        Boolean property defining if tickers are necessary.
-        If no Pairlist requires tickers, an empty List is passed
-        as tickers argument to filter_pairlist
-        """
-        return False
+        if self._sort_direction not in [None, "asc", "desc"]:
+            raise OperationalException(
+                f"{self.name} requires sort_direction to be "
+                "either None (undefined), 'asc' or 'desc'"
+            )
 
     def short_desc(self) -> str:
         """
@@ -53,73 +45,122 @@ class RangeStabilityFilter(IPairList):
         """
         max_rate_desc = ""
         if self._max_rate_of_change:
-            max_rate_desc = (f" and above {self._max_rate_of_change}")
-        return (f"{self.name} - Filtering pairs with rate of change below "
-                f"{self._min_rate_of_change}{max_rate_desc} over the "
-                f"last {plural(self._days, 'day')}.")
+            max_rate_desc = f" and above {self._max_rate_of_change}"
+        return (
+            f"{self.name} - Filtering pairs with rate of change below "
+            f"{self._min_rate_of_change}{max_rate_desc} over the "
+            f"last {self._lookback_period} x {self._lookback_timeframe} "
+            f"{plural(self._lookback_period, 'candle')}."
+        )
 
-    def filter_pairlist(self, pairlist: List[str], tickers: Dict) -> List[str]:
+    @staticmethod
+    def description() -> str:
+        return "Filters pairs by their rate of change."
+
+    @staticmethod
+    def available_parameters() -> dict[str, PairlistParameter]:
+        return {
+            "min_rate_of_change": {
+                "type": "number",
+                "default": 0.01,
+                "description": "Minimum Rate of Change",
+                "help": "Minimum rate of change to filter pairs.",
+            },
+            "max_rate_of_change": {
+                "type": "number",
+                "default": None,
+                "description": "Maximum Rate of Change",
+                "help": "Maximum rate of change to filter pairs.",
+            },
+            "sort_direction": {
+                "type": "option",
+                "default": None,
+                "options": ["", "asc", "desc"],
+                "description": "Sort pairlist",
+                "help": "Sort Pairlist ascending or descending by rate of change.",
+            },
+            **IPairList.refresh_period_parameter(),
+            **IPairList.lookback_parameters(default_period=10),
+        }
+
+    def filter_pairlist(self, pairlist: list[str], tickers: Tickers) -> list[str]:
         """
         Validate trading range
         :param pairlist: pairlist to filter or sort
-        :param tickers: Tickers (from exchange.get_tickers()). May be cached.
+        :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: new allowlist
         """
-        needed_pairs = [(p, '1d') for p in pairlist if p not in self._pair_cache]
+        needed_pairs: ListPairsWithTimeframes = [
+            (p, self._lookback_timeframe, self._def_candletype)
+            for p in pairlist
+            if p not in self._pair_cache
+        ]
 
-        since_ms = (arrow.utcnow()
-                         .floor('day')
-                         .shift(days=-self._days - 1)
-                         .int_timestamp) * 1000
-        # Get all candles
-        candles = {}
-        if needed_pairs:
-            candles = self._exchange.refresh_latest_ohlcv(needed_pairs, since_ms=since_ms,
-                                                          cache=False)
+        candles = self._exchange.refresh_ohlcv_with_cache(
+            needed_pairs, lookback_period=self._lookback_period
+        )
 
-        if self._enabled:
-            for p in deepcopy(pairlist):
-                daily_candles = candles[(p, '1d')] if (p, '1d') in candles else None
-                if not self._validate_pair_loc(p, daily_candles):
-                    pairlist.remove(p)
-        return pairlist
+        resulting_pairlist: list[str] = []
+        pct_changes: dict[str, float] = {}
 
-    def _validate_pair_loc(self, pair: str, daily_candles: Optional[DataFrame]) -> bool:
+        for p in pairlist:
+            pair_candles = candles.get((p, self._lookback_timeframe, self._def_candletype), None)
+
+            pct_change = self._calculate_rate_of_change(p, pair_candles)
+
+            if pct_change is not None:
+                if self._validate_pair_loc(p, pct_change):
+                    resulting_pairlist.append(p)
+                    pct_changes[p] = pct_change
+            else:
+                self.log_once(f"Removed {p} from whitelist, no candles found.", logger.info)
+
+        if self._sort_direction:
+            resulting_pairlist = sorted(
+                resulting_pairlist,
+                key=lambda p: pct_changes[p],
+                reverse=self._sort_direction == "desc",
+            )
+        return resulting_pairlist
+
+    def _calculate_rate_of_change(self, pair: str, pair_candles: DataFrame) -> float | None:
+        # Check symbol in cache
+        if (pct_change := self._pair_cache.get(pair, None)) is not None:
+            return pct_change
+        if pair_candles is not None and not pair_candles.empty:
+            highest_high = pair_candles["high"].max()
+            lowest_low = pair_candles["low"].min()
+            pct_change = ((highest_high - lowest_low) / lowest_low) if lowest_low > 0 else 0
+            self._pair_cache[pair] = pct_change
+            return pct_change
+        else:
+            return None
+
+    def _validate_pair_loc(self, pair: str, pct_change: float) -> bool:
         """
         Validate trading range
         :param pair: Pair that's currently validated
-        :param ticker: ticker dict as returned from ccxt.fetch_tickers()
+        :param pct_change: Rate of change
         :return: True if the pair can stay, false if it should be removed
         """
-        # Check symbol in cache
-        cached_res = self._pair_cache.get(pair, None)
-        if cached_res is not None:
-            return cached_res
 
-        result = False
-        if daily_candles is not None and not daily_candles.empty:
-            highest_high = daily_candles['high'].max()
-            lowest_low = daily_candles['low'].min()
-            pct_change = ((highest_high - lowest_low) / lowest_low) if lowest_low > 0 else 0
-            if pct_change >= self._min_rate_of_change:
-                result = True
-            else:
-                self.log_once(f"Removed {pair} from whitelist, because rate of change "
-                              f"over {self._days} {plural(self._days, 'day')} is {pct_change:.3f}, "
-                              f"which is below the threshold of {self._min_rate_of_change}.",
-                              logger.info)
-                result = False
-            if self._max_rate_of_change:
-                if pct_change <= self._max_rate_of_change:
-                    result = True
-                else:
-                    self.log_once(
-                        f"Removed {pair} from whitelist, because rate of change "
-                        f"over {self._days} {plural(self._days, 'day')} is {pct_change:.3f}, "
-                        f"which is above the threshold of {self._max_rate_of_change}.",
-                        logger.info)
-                    result = False
-            self._pair_cache[pair] = result
-        else:
-            self.log_once(f"Removed {pair} from whitelist, no candles found.", logger.info)
+        result = True
+        if pct_change < self._min_rate_of_change:
+            self.log_once(
+                f"Removed {pair} from whitelist, because rate of change "
+                f"over {self._lookback_period} x {self._lookback_timeframe} "
+                f"{plural(self._lookback_period, 'candle')} is {pct_change:.3f}, "
+                f"which is below the threshold of {self._min_rate_of_change}.",
+                logger.info,
+            )
+            result = False
+        if self._max_rate_of_change and pct_change > self._max_rate_of_change:
+            self.log_once(
+                f"Removed {pair} from whitelist, because rate of change "
+                f"over {self._lookback_period} x {self._lookback_timeframe} "
+                f"{plural(self._lookback_period, 'candle')} is {pct_change:.3f}, "
+                f"which is above the threshold of {self._max_rate_of_change}.",
+                logger.info,
+            )
+            result = False
         return result

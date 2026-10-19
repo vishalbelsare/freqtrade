@@ -6,12 +6,16 @@ function echo_block() {
     echo $1
     echo "----------------------------"
 }
+UV=false
+# Supported Python minor versions (order matters for detection)
+SUPPORTED_MINOR_VERS=(14 13 12)
+SUPPORTED_PY_VERSIONS="3.12, 3.13 and 3.14"
 
 function check_installed_pip() {
    ${PYTHON} -m pip > /dev/null
    if [ $? -ne 0 ]; then
         echo_block "Installing Pip for ${PYTHON}"
-        curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+        curl https://bootstrap.pypa.io/get-pip.py -s -o get-pip.py
         ${PYTHON} get-pip.py
         rm get-pip.py
    fi
@@ -24,106 +28,105 @@ function check_installed_python() {
         echo "You can do this by running 'deactivate'."
         exit 2
     fi
+    if [ -x "$(command -v uv)" ]; then
+        echo "uv detected — using it instead of pip for faster installation."
+        PIP="uv pip"
+        PYTHON="python3.13"
+        UV=true
+        return
+    fi
 
-    for v in 9 8 7
+    for v in "${SUPPORTED_MINOR_VERS[@]}"
     do
         PYTHON="python3.${v}"
         which $PYTHON
         if [ $? -eq 0 ]; then
             echo "using ${PYTHON}"
             check_installed_pip
+            PIP="${PYTHON} -m pip"
             return
         fi
     done
 
-    echo "No usable python found. Please make sure to have python3.7 or newer installed."
-    echo "python3.10 is currently not supported."
+    echo "No usable python found. Supported versions are: ${SUPPORTED_PY_VERSIONS}. Please install one of these."
     exit 1
 }
 
 function updateenv() {
-    echo_block "Updating your virtual env"
-    if [ ! -f .env/bin/activate ]; then
+    echo_block "Updating your virtual environment"
+    if [ ! -f .venv/bin/activate ]; then
         echo "Something went wrong, no virtual environment found."
         exit 1
     fi
-    source .env/bin/activate
+    source .venv/bin/activate
     SYS_ARCH=$(uname -m)
     echo "pip install in-progress. Please wait..."
-    ${PYTHON} -m pip install --upgrade pip
-    read -p "Do you want to install dependencies for dev [y/N]? "
+    ${PIP} install --upgrade pip wheel setuptools
+    REQUIREMENTS_HYPEROPT=""
+    REQUIREMENTS_PLOT=""
+    REQUIREMENTS_FREQAI=""
+    REQUIREMENTS_FREQAI_RL=""
+    REQUIREMENTS=requirements.txt
+
+    read -p "Do you want to install dependencies for development (Performs a full install with all dependencies) [y/N]? "
+    dev=$REPLY
     if [[ $REPLY =~ ^[Yy]$ ]]
     then
         REQUIREMENTS=requirements-dev.txt
     else
-        REQUIREMENTS=requirements.txt
-    fi
-    REQUIREMENTS_HYPEROPT=""
-    REQUIREMENTS_PLOT=""
-     read -p "Do you want to install plotting dependencies (plotly) [y/N]? "
-    if [[ $REPLY =~ ^[Yy]$ ]]
-    then
-        REQUIREMENTS_PLOT="-r requirements-plot.txt"
-    fi
-    if [ "${SYS_ARCH}" == "armv7l" ] || [ "${SYS_ARCH}" == "armv6l" ]; then
-        echo "Detected Raspberry, installing cython, skipping hyperopt installation."
-        ${PYTHON} -m pip install --upgrade cython
-    else
-        # Is not Raspberry
-        read -p "Do you want to install hyperopt dependencies [y/N]? "
+        # requirements-dev.txt includes all the below requirements already, so further questions are pointless.
+        read -p "Do you want to install plotting dependencies (plotly) [y/N]? "
         if [[ $REPLY =~ ^[Yy]$ ]]
         then
-            REQUIREMENTS_HYPEROPT="-r requirements-hyperopt.txt"
+            REQUIREMENTS_PLOT="-r requirements-plot.txt"
+        fi
+        if [ "${SYS_ARCH}" == "armv7l" ] || [ "${SYS_ARCH}" == "armv6l" ]; then
+            echo "Detected Raspberry, installing cython, skipping hyperopt installation."
+            ${PIP} install --upgrade cython
+        else
+            # Is not Raspberry
+            read -p "Do you want to install hyperopt dependencies [y/N]? "
+            if [[ $REPLY =~ ^[Yy]$ ]]
+            then
+                REQUIREMENTS_HYPEROPT="-r requirements-hyperopt.txt"
+            fi
+        fi
+
+        read -p "Do you want to install dependencies for freqai [y/N]? "
+        if [[ $REPLY =~ ^[Yy]$ ]]
+        then
+            REQUIREMENTS_FREQAI="-r requirements-freqai.txt"
+            read -p "Do you also want dependencies for freqai-rl or PyTorch (~700mb additional space required) [y/N]? "
+            if [[ $REPLY =~ ^[Yy]$ ]]
+            then
+                REQUIREMENTS_FREQAI="-r requirements-freqai-rl.txt"
+            fi
         fi
     fi
 
-    ${PYTHON} -m pip install --upgrade -r ${REQUIREMENTS} ${REQUIREMENTS_HYPEROPT} ${REQUIREMENTS_PLOT}
+    ${PIP} install --upgrade -r ${REQUIREMENTS} ${REQUIREMENTS_HYPEROPT} ${REQUIREMENTS_PLOT} ${REQUIREMENTS_FREQAI} ${REQUIREMENTS_FREQAI_RL}
     if [ $? -ne 0 ]; then
         echo "Failed installing dependencies"
         exit 1
     fi
-    ${PYTHON} -m pip install -e .
+    ${PIP} install -e .
     if [ $? -ne 0 ]; then
         echo "Failed installing Freqtrade"
         exit 1
     fi
+
+    echo "Installing freqUI"
+    freqtrade install-ui
+
     echo "pip install completed"
     echo
-}
-
-# Install tab lib
-function install_talib() {
-    if [ -f /usr/local/lib/libta_lib.a ]; then
-        echo "ta-lib already installed, skipping"
-        return
+    if [[ $dev =~ ^[Yy]$ ]]; then
+        ${PYTHON} -m pre_commit install
+        if [ $? -ne 0 ]; then
+            echo "Failed installing pre-commit"
+            exit 1
+        fi
     fi
-
-    cd build_helpers && ./install_ta-lib.sh
-
-    if [ $? -ne 0 ]; then
-        echo "Quitting. Please fix the above error before continuing."
-        cd ..
-        exit 1
-    fi;
-
-    cd ..
-}
-
-function install_mac_newer_python_dependencies() {
-
-    if [ ! $(brew --prefix --installed hdf5 2>/dev/null) ]
-    then
-        echo_block "Installing hdf5"
-        brew install hdf5
-    fi
-    export HDF5_DIR=$(brew --prefix)
-
-    if [ ! $(brew --prefix --installed c-blosc 2>/dev/null) ]
-    then
-        echo_block "Installing c-blosc"
-        brew install c-blosc
-    fi
-    export CBLOSC_DIR=$(brew --prefix)
 }
 
 # Install bot MacOS
@@ -133,33 +136,72 @@ function install_macos() {
         echo_block "Installing Brew"
         /usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
     fi
+
+    brew install gettext libomp
+
     #Gets number after decimal in python version
     version=$(egrep -o 3.\[0-9\]+ <<< $PYTHON | sed 's/3.//g')
-
-    if [[ $version -ge 9 ]]; then               #Checks if python version >= 3.9
-        install_mac_newer_python_dependencies
-    fi
-    install_talib
 }
 
 # Install bot Debian_ubuntu
 function install_debian() {
     sudo apt-get update
-    sudo apt-get install -y gcc build-essential autoconf libtool pkg-config make wget git $(echo lib${PYTHON}-dev ${PYTHON}-venv)
-    install_talib
+    sudo apt-get install -y gcc build-essential autoconf libtool pkg-config make wget git curl $(echo lib${PYTHON}-dev ${PYTHON}-venv)
 }
 
 # Install bot RedHat_CentOS
 function install_redhat() {
     sudo yum update
     sudo yum install -y gcc gcc-c++ make autoconf libtool pkg-config wget git $(echo ${PYTHON}-devel | sed 's/\.//g')
-    install_talib
 }
 
 # Upgrade the bot
 function update() {
     git pull
+    if [ -f .env/bin/activate  ]; then
+        # Old environment found - updating to new environment.
+        recreate_environments
+    fi
     updateenv
+    echo "Update completed."
+    echo_block "Don't forget to activate your virtual environment with 'source .venv/bin/activate'!"
+
+}
+
+function check_git_changes() {
+    if [ -z "$(git status --porcelain)" ]; then
+        echo "No changes in git directory"
+        return 1
+    else
+        echo "Changes in git directory"
+        return 0
+    fi
+}
+
+function recreate_environments() {
+    if [ -d ".env" ]; then
+        # Remove old virtual env
+        echo "- Deleting your previous virtual env"
+        echo "Warning: Your new environment will be at .venv!"
+        rm -rf .env
+    fi
+    if [ -d ".venv" ]; then
+        echo "- Deleting your previous virtual env"
+        rm -rf .venv
+    fi
+
+    echo
+    if [ "$UV" = true ] ; then
+        echo "- Creating new virtual environment with uv"
+        uv venv .venv --python=${PYTHON}
+    else
+        ${PYTHON} -m venv .venv
+    fi
+    if [ $? -ne 0 ]; then
+        echo "Could not create virtual environment. Leaving now"
+        exit 1
+    fi
+
 }
 
 # Reset Develop or Stable branch
@@ -168,41 +210,33 @@ function reset() {
 
     if [ "1" == $(git branch -vv |grep -cE "\* develop|\* stable") ]
     then
+        if check_git_changes; then
+            read -p "Keep your local changes? (Otherwise will remove all changes you made!) [Y/n]? "
+            if [[ $REPLY =~ ^[Nn]$ ]]; then
 
-        read -p "Reset git branch? (This will remove all changes you made!) [y/N]? "
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+                git fetch -a
 
-            git fetch -a
-
-            if [ "1" == $(git branch -vv | grep -c "* develop") ]
-            then
-                echo "- Hard resetting of 'develop' branch."
-                git reset --hard origin/develop
-            elif [ "1" == $(git branch -vv | grep -c "* stable") ]
-            then
-                echo "- Hard resetting of 'stable' branch."
-                git reset --hard origin/stable
+                if [ "1" == $(git branch -vv | grep -c "* develop") ]
+                then
+                    echo "- Hard resetting of 'develop' branch."
+                    git reset --hard origin/develop
+                elif [ "1" == $(git branch -vv | grep -c "* stable") ]
+                then
+                    echo "- Hard resetting of 'stable' branch."
+                    git reset --hard origin/stable
+                fi
             fi
         fi
     else
         echo "Reset ignored because you are not on 'stable' or 'develop'."
     fi
+    recreate_environments
 
-    if [ -d ".env" ]; then
-        echo "- Deleting your previous virtual env"
-        rm -rf .env
-    fi
-    echo
-    ${PYTHON} -m venv .env
-    if [ $? -ne 0 ]; then
-        echo "Could not create virtual environment. Leaving now"
-        exit 1
-    fi
     updateenv
 }
 
 function config() {
-    echo_block "Please use 'freqtrade new-config -c config.json' to generate a new configuration file."
+    echo_block "Please use 'freqtrade new-config -c user_data/config.json' to generate a new configuration file."
 }
 
 function install() {
@@ -220,7 +254,7 @@ function install() {
         install_redhat
     else
         echo "This script does not support your OS."
-        echo "If you have Python version 3.7 - 3.9, pip, virtualenv, ta-lib you can continue."
+        echo "If you have Python version 3.12 - 3.14, pip, virtualenv installed you can continue."
         echo "Wait 10 seconds to continue the next install steps or use ctrl+c to interrupt this shell."
         sleep 10
     fi
@@ -228,14 +262,14 @@ function install() {
     reset
     config
     echo_block "Run the bot !"
-    echo "You can now use the bot by executing 'source .env/bin/activate; freqtrade <subcommand>'."
-    echo "You can see the list of available bot sub-commands by executing 'source .env/bin/activate; freqtrade --help'."
-    echo "You verify that freqtrade is installed successfully by running 'source .env/bin/activate; freqtrade --version'."
+    echo "You can now use the bot by executing 'source .venv/bin/activate; freqtrade <subcommand>'."
+    echo "You can see the list of available bot sub-commands by executing 'source .venv/bin/activate; freqtrade --help'."
+    echo "You verify that freqtrade is installed successfully by running 'source .venv/bin/activate; freqtrade --version'."
 }
 
 function plot() {
     echo_block "Installing dependencies for Plotting scripts"
-    ${PYTHON} -m pip install plotly --upgrade
+    ${PIP} install plotly --upgrade
 }
 
 function help() {
@@ -247,7 +281,7 @@ function help() {
     echo "	-p,--plot       Install dependencies for Plotting scripts."
 }
 
-# Verify if 3.7 or 3.8 is installed
+# Verify if 3.12+ is installed
 check_installed_python
 
 case $* in

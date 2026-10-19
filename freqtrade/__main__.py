@@ -3,11 +3,11 @@
 __main__.py for Freqtrade
 To launch Freqtrade as a module
 
-> python -m freqtrade (with Python >= 3.7)
+> python -m freqtrade (with Python >= 3.12)
 """
 
 from freqtrade import main
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main.main()

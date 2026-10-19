@@ -1,17 +1,26 @@
-from enum import Enum
+from enum import StrEnum
 
 
-class SignalType(Enum):
+class SignalType(StrEnum):
     """
-    Enum to distinguish between buy and sell signals
+    Enum to distinguish between enter and exit signals
     """
-    BUY = "buy"
-    SELL = "sell"
+
+    ENTER_LONG = "enter_long"
+    EXIT_LONG = "exit_long"
+    ENTER_SHORT = "enter_short"
+    EXIT_SHORT = "exit_short"
 
 
-class SignalTagType(Enum):
+class SignalTagType(StrEnum):
     """
     Enum for signal columns
     """
-    BUY_TAG = "buy_tag"
+
+    ENTER_TAG = "enter_tag"
     EXIT_TAG = "exit_tag"
+
+
+class SignalDirection(StrEnum):
+    LONG = "long"
+    SHORT = "short"

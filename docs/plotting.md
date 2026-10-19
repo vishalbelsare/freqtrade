@@ -2,6 +2,14 @@
 
 This page explains how to plot prices, indicators and profits.
 
+!!! Warning "Deprecated"
+    The commands described in this page (`plot-dataframe`, `plot-profit`) should be considered deprecated and are in maintenance mode.
+    This is mostly for the performance problems even medium sized plots can cause, but also because "store a file and open it in a browser" isn't very intuitive from a UI perspective.
+
+    While there are no immediate plans to remove them, they are not actively maintained - and may be removed short-term should major changes be required to keep them working.
+    
+    Please use [FreqUI](freq-ui.md) for plotting needs, which doesn't struggle with the same performance problems.
+
 ## Installation / Setup
 
 Plotting modules use the Plotly library. You can install / upgrade this by running the following command:
@@ -14,7 +22,7 @@ pip install -U -r requirements-plot.txt
 
 The `freqtrade plot-dataframe` subcommand shows an interactive graph with three subplots:
 
-* Main plot with candlestics and indicators following price (sma/ema)
+* Main plot with candlesticks and indicators following price (sma/ema)
 * Volume bars
 * Additional indicators as specified by `--indicators2`
 
@@ -22,81 +30,12 @@ The `freqtrade plot-dataframe` subcommand shows an interactive graph with three 
 
 Possible arguments:
 
-```
-usage: freqtrade plot-dataframe [-h] [-v] [--logfile FILE] [-V] [-c PATH]
-                                [-d PATH] [--userdir PATH] [-s NAME]
-                                [--strategy-path PATH] [-p PAIRS [PAIRS ...]]
-                                [--indicators1 INDICATORS1 [INDICATORS1 ...]]
-                                [--indicators2 INDICATORS2 [INDICATORS2 ...]]
-                                [--plot-limit INT] [--db-url PATH]
-                                [--trade-source {DB,file}] [--export EXPORT]
-                                [--export-filename PATH]
-                                [--timerange TIMERANGE] [-i TIMEFRAME]
-                                [--no-trades]
-
-optional arguments:
-  -h, --help            show this help message and exit
-  -p PAIRS [PAIRS ...], --pairs PAIRS [PAIRS ...]
-                        Limit command to these pairs. Pairs are space-
-                        separated.
-  --indicators1 INDICATORS1 [INDICATORS1 ...]
-                        Set indicators from your strategy you want in the
-                        first row of the graph. Space-separated list. Example:
-                        `ema3 ema5`. Default: `['sma', 'ema3', 'ema5']`.
-  --indicators2 INDICATORS2 [INDICATORS2 ...]
-                        Set indicators from your strategy you want in the
-                        third row of the graph. Space-separated list. Example:
-                        `fastd fastk`. Default: `['macd', 'macdsignal']`.
-  --plot-limit INT      Specify tick limit for plotting. Notice: too high
-                        values cause huge files. Default: 750.
-  --db-url PATH         Override trades database URL, this is useful in custom
-                        deployments (default: `sqlite:///tradesv3.sqlite` for
-                        Live Run mode, `sqlite:///tradesv3.dryrun.sqlite` for
-                        Dry Run).
-  --trade-source {DB,file}
-                        Specify the source for trades (Can be DB or file
-                        (backtest file)) Default: file
-  --export EXPORT       Export backtest results, argument are: trades.
-                        Example: `--export=trades`
-  --export-filename PATH
-                        Save backtest results to the file with this filename.
-                        Requires `--export` to be set as well. Example:
-                        `--export-filename=user_data/backtest_results/backtest
-                        _today.json`
-  --timerange TIMERANGE
-                        Specify what timerange of data to use.
-  -i TIMEFRAME, --timeframe TIMEFRAME, --ticker-interval TIMEFRAME
-                        Specify timeframe (`1m`, `5m`, `30m`, `1h`, `1d`).
-  --no-trades           Skip using trades from backtesting file and DB.
-
-Common arguments:
-  -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).
-  --logfile FILE        Log to the file specified. Special values are:
-                        'syslog', 'journald'. See the documentation for more
-                        details.
-  -V, --version         show program's version number and exit
-  -c PATH, --config PATH
-                        Specify configuration file (default:
-                        `userdir/config.json` or `config.json` whichever
-                        exists). Multiple --config options may be used. Can be
-                        set to `-` to read config from stdin.
-  -d PATH, --datadir PATH
-                        Path to directory with historical backtesting data.
-  --userdir PATH, --user-data-dir PATH
-                        Path to userdata directory.
-
-Strategy arguments:
-  -s NAME, --strategy NAME
-                        Specify strategy class name which will be used by the
-                        bot.
-  --strategy-path PATH  Specify additional strategy lookup path.
-
-```
+--8<-- "commands/plot-dataframe.md"
 
 Example:
 
 ``` bash
-freqtrade plot-dataframe -p BTC/ETH
+freqtrade plot-dataframe -p BTC/ETH --strategy AwesomeStrategy
 ```
 
 The `-p/--pairs` argument can be used to specify pairs you would like to plot.
@@ -106,9 +45,6 @@ The `-p/--pairs` argument can be used to specify pairs you would like to plot.
 
 Specify custom indicators.
 Use `--indicators1` for the main plot and `--indicators2` for the subplot below (if values are in a different range than prices).
-
-!!! Tip
-    You will almost certainly want to specify a custom strategy! This can be done by adding `-s Classname` / `--strategy ClassName` to the command.
 
 ``` bash
 freqtrade plot-dataframe --strategy AwesomeStrategy -p BTC/ETH --indicators1 sma ema --indicators2 macd
@@ -175,10 +111,10 @@ It also allows multiple subplots to display both MACD and RSI at the same time.
 
 Plot type can be configured using `type` key. Possible types are:
 
-* `scatter` corresponding to `plotly.graph_objects.Scatter` class (default).
-* `bar` corresponding to `plotly.graph_objects.Bar` class.
+* `scatter` corresponding a scatter plot.
+* `bar` corresponding to a bar plot.
 
-Extra parameters to `plotly.graph_objects.*` constructor can be specified in `plotly` dict.
+Extra parameters to `plotly.graph_objects.*` constructor can be specified in `plotly` dict - these are only supported when using plotly as plotting library and will be ignored when using freq-ui.
 
 Sample configuration with inline comments explaining the process:
 
@@ -227,7 +163,7 @@ def plot_config(self):
 ```
 
 ??? Note "As attribute (former method)"
-    Assigning plot_config is also possible as Attribute (this used to be the default way).
+    Assigning `plot_config` is also possible as Attribute (this used to be the default way).
     This has the disadvantage that strategy parameters are not available, preventing certain configurations from working.
 
     ``` python
@@ -273,6 +209,9 @@ def plot_config(self):
 !!! Warning
     `plotly` arguments are only supported with plotly library and will not work with freq-ui.
 
+!!! Note "Trade position adjustments"
+    If `position_adjustment_enable` / `adjust_trade_position()` is used, the trade initial buy price is averaged over multiple orders and the trade start price will most likely appear outside the candle range.
+
 ## Plot profit
 
 ![plot-profit](assets/plot-profit.png)
@@ -283,6 +222,8 @@ The `plot-profit` subcommand shows an interactive graph with three plots:
 * The summarized profit made by backtesting.
 Note that this is not the real-world profit, but more of an estimate.
 * Profit for each individual pair.
+* Parallelism of trades.
+* Underwater (Periods of drawdown).
 
 The first graph is good to get a grip of how the overall market progresses.
 
@@ -292,64 +233,11 @@ This graph will also highlight the start (and end) of the Max drawdown period.
 
 The third graph can be useful to spot outliers, events in pairs that cause profit spikes.
 
+The forth graph can help you analyze trade parallelism, showing how often max_open_trades have been maxed out.
+
 Possible options for the `freqtrade plot-profit` subcommand:
 
-```
-usage: freqtrade plot-profit [-h] [-v] [--logfile FILE] [-V] [-c PATH]
-                             [-d PATH] [--userdir PATH] [-s NAME]
-                             [--strategy-path PATH] [-p PAIRS [PAIRS ...]]
-                             [--timerange TIMERANGE] [--export EXPORT]
-                             [--export-filename PATH] [--db-url PATH]
-                             [--trade-source {DB,file}] [-i TIMEFRAME]
-
-optional arguments:
-  -h, --help            show this help message and exit
-  -p PAIRS [PAIRS ...], --pairs PAIRS [PAIRS ...]
-                        Limit command to these pairs. Pairs are space-
-                        separated.
-  --timerange TIMERANGE
-                        Specify what timerange of data to use.
-  --export EXPORT       Export backtest results, argument are: trades.
-                        Example: `--export=trades`
-  --export-filename PATH
-                        Save backtest results to the file with this filename.
-                        Requires `--export` to be set as well. Example:
-                        `--export-filename=user_data/backtest_results/backtest
-                        _today.json`
-  --db-url PATH         Override trades database URL, this is useful in custom
-                        deployments (default: `sqlite:///tradesv3.sqlite` for
-                        Live Run mode, `sqlite:///tradesv3.dryrun.sqlite` for
-                        Dry Run).
-  --trade-source {DB,file}
-                        Specify the source for trades (Can be DB or file
-                        (backtest file)) Default: file
-  -i TIMEFRAME, --timeframe TIMEFRAME, --ticker-interval TIMEFRAME
-                        Specify timeframe (`1m`, `5m`, `30m`, `1h`, `1d`).
-  --auto-open           Automatically open generated plot.
-
-Common arguments:
-  -v, --verbose         Verbose mode (-vv for more, -vvv to get all messages).
-  --logfile FILE        Log to the file specified. Special values are:
-                        'syslog', 'journald'. See the documentation for more
-                        details.
-  -V, --version         show program's version number and exit
-  -c PATH, --config PATH
-                        Specify configuration file (default:
-                        `userdir/config.json` or `config.json` whichever
-                        exists). Multiple --config options may be used. Can be
-                        set to `-` to read config from stdin.
-  -d PATH, --datadir PATH
-                        Path to directory with historical backtesting data.
-  --userdir PATH, --user-data-dir PATH
-                        Path to userdata directory.
-
-Strategy arguments:
-  -s NAME, --strategy NAME
-                        Specify strategy class name which will be used by the
-                        bot.
-  --strategy-path PATH  Specify additional strategy lookup path.
-
-```
+--8<-- "commands/plot-profit.md"
 
 The `-p/--pairs`  argument, can be used to limit the pairs that are considered for this calculation.
 

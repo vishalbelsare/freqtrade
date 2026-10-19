@@ -3,38 +3,53 @@
 Main Freqtrade bot script.
 Read the documentation to know what cli arguments you need.
 """
+
 import logging
 import sys
-from typing import Any, List
 
 
 # check min. python version
-if sys.version_info < (3, 7):  # pragma: no cover
-    sys.exit("Freqtrade requires Python version >= 3.7")
+if sys.version_info < (3, 12):  # pragma: no cover  # noqa: UP036
+    sys.exit("Freqtrade requires Python version >= 3.12")
 
+from freqtrade import __version__
 from freqtrade.commands import Arguments
-from freqtrade.exceptions import FreqtradeException, OperationalException
+from freqtrade.constants import DOCS_LINK
+from freqtrade.exceptions import ConfigurationError, FreqtradeException, OperationalException
 from freqtrade.loggers import setup_logging_pre
+from freqtrade.system import (
+    asyncio_setup,
+    gc_set_threshold,
+    print_version_info,
+    set_mp_start_method,
+)
 
 
-logger = logging.getLogger('freqtrade')
+logger = logging.getLogger("freqtrade")
 
 
-def main(sysargv: List[str] = None) -> None:
+def main(sysargv: list[str] | None = None) -> None:
     """
     This function will initiate the bot and start the trading loop.
     :return: None
     """
 
-    return_code: Any = 1
+    return_code: int | None = None
     try:
         setup_logging_pre()
+        asyncio_setup()
         arguments = Arguments(sysargv)
         args = arguments.get_parsed_arg()
 
         # Call subcommand.
-        if 'func' in args:
-            return_code = args['func'](args)
+        if args.get("version") or args.get("version_main"):
+            print_version_info()
+            return_code = 0
+        elif "func" in args:
+            logger.info(f"freqtrade {__version__}")
+            gc_set_threshold()
+            set_mp_start_method()
+            return_code = args["func"](args)
         else:
             # No subcommand was issued.
             raise OperationalException(
@@ -46,19 +61,23 @@ def main(sysargv: List[str] = None) -> None:
                 "`freqtrade --help` or `freqtrade <command> --help`."
             )
 
-    except SystemExit as e:  # pragma: no cover
-        return_code = e
     except KeyboardInterrupt:
-        logger.info('SIGINT received, aborting ...')
-        return_code = 0
+        logger.info("SIGINT received, aborting ...")
+        return_code = 130
+    except ConfigurationError as e:
+        logger.error(
+            f"Configuration error: {e}\n"
+            f"Please make sure to review the documentation at {DOCS_LINK}."
+        )
     except FreqtradeException as e:
         logger.error(str(e))
         return_code = 2
     except Exception:
-        logger.exception('Fatal exception!')
+        logger.exception("Fatal exception!")
+        return_code = 1
     finally:
         sys.exit(return_code)
 
 
-if __name__ == '__main__':  # pragma: no cover
+if __name__ == "__main__":  # pragma: no cover
     main()
